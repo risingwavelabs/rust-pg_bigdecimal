@@ -1,14 +1,10 @@
-use bytes::{BufMut, BytesMut};
-use postgres::types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 use std::convert::TryInto;
 
-pub use bigdecimal::BigDecimal;
-pub use num::{BigInt, BigUint, Integer};
-#[cfg(feature = "serde")]
-use std::str::FromStr;
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use bigdecimal::BigDecimal;
+use bytes::{BufMut, BytesMut};
+use num_bigint::{BigInt, BigUint};
+use num_integer::Integer;
+use postgres_types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 
 /// A rust variant of the Postgres Numeric type. The full spectrum of Postgres'
 /// Numeric value range is supported.
@@ -47,8 +43,8 @@ impl<'a> FromSql<'a> for PgNumeric {
         let n_digits = rdr.read_u16::<BigEndian>()?;
         let weight = rdr.read_i16::<BigEndian>()?;
         let sign = match rdr.read_u16::<BigEndian>()? {
-            0x4000 => num::bigint::Sign::Minus,
-            0x0000 => num::bigint::Sign::Plus,
+            0x4000 => num_bigint::Sign::Minus,
+            0x0000 => num_bigint::Sign::Plus,
             0xC000 => return Ok(Self { n: None }),
             _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "").into()),
         };
@@ -111,7 +107,7 @@ impl ToSql for PgNumeric {
             Some(n) => {
                 let (bigint, exponent) = n.as_bigint_and_exponent();
                 let (sign, biguint) = bigint.into_parts();
-                let neg = sign == num::bigint::Sign::Minus;
+                let neg = sign == num_bigint::Sign::Minus;
                 let scale: i16 = exponent.try_into()?;
 
                 let (integer, decimal) = biguint.div_rem(&BigUint::from(10u32).pow(scale as u32));
@@ -294,7 +290,7 @@ fn integration_tests() {
     use std::str::FromStr;
 
     let mut dbconn = Client::connect(
-        "host=localhost port=15432 user=test password=test dbname=test",
+        "host=localhost port=5432 user=kexiang password=postgres dbname=postgres",
         NoTls,
     )
     .unwrap();
@@ -372,58 +368,6 @@ fn integration_tests() {
         };
         test_for_pgnumeric(n);
     }
-}
 
-#[cfg(feature = "serde")]
-impl Serialize for PgNumeric {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match &self.n {
-            None => serializer.serialize_none(),
-            Some(bigdecimal) => serializer.serialize_some(&bigdecimal.to_string().as_str()),
-        }
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'a> Deserialize<'a> for PgNumeric {
-    fn deserialize<D>(deserializer: D) -> Result<PgNumeric, D::Error>
-    where
-        D: Deserializer<'a>,
-    {
-        struct BigDecimalVisitor {}
-        impl<'de> serde::de::Visitor<'de> for BigDecimalVisitor {
-            type Value = Option<BigDecimal>;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "a string that is parseable as a bigdecimal",)
-            }
-
-            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(Some(BigDecimal::from_str(s).unwrap()))
-            }
-
-            fn visit_some<D>(self, d: D) -> Result<Self::Value, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                d.deserialize_str(BigDecimalVisitor {})
-            }
-
-            fn visit_none<E>(self) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(None)
-            }
-        }
-
-        let n = deserializer.deserialize_option(BigDecimalVisitor {})?;
-        Ok(PgNumeric { n })
-    }
+    dbconn.execute("DROP TABLE foobar", &[]).unwrap();
 }
