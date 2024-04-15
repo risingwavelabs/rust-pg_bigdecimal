@@ -29,9 +29,13 @@ impl PgNumeric {
         self.n.is_none()
     }
 
-    pub fn round(&mut self) {
-        if let Some(n) = &mut self.n {
-            *n = n.round(0);
+    pub fn round(&self) -> Self {
+        if let Some(n) = &self.n {
+            Self {
+                n: Some(n.round(0)),
+            }
+        } else {
+            Self { n: None }
         }
     }
 }
