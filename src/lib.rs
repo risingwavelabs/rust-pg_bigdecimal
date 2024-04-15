@@ -28,6 +28,12 @@ impl PgNumeric {
     pub fn is_nan(&self) -> bool {
         self.n.is_none()
     }
+
+    pub fn round(&mut self) {
+        if let Some(n) = &mut self.n {
+            *n = n.round(0);
+        }
+    }
 }
 
 use byteorder::{BigEndian, ReadBytesExt};
