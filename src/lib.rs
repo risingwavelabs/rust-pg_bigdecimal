@@ -12,21 +12,27 @@ use postgres_types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 /// Represented as an Optional BigDecimal. None for 'NaN', Some(bigdecimal) for
 /// all other values.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
-pub struct PgNumeric {
-    pub n: Option<BigDecimal>,
+pub enum PgNumeric {
+    NegativeInf,
+    Normalized(BigDecimal),
+    PositiveInf,
+    NaN,
 }
 
 impl PgNumeric {
     /// Construct a new PgNumeric value from an optional BigDecimal
     /// (None for NaN values).
     pub fn new(n: Option<BigDecimal>) -> Self {
-        Self { n }
+        match n {
+            None => Self::NaN,
+            Some(n) => Self::Normalized(n),
+        }
     }
 
     /// Returns true if this PgNumeric value represents a NaN value.
     /// Otherwise returns false.
     pub fn is_nan(&self) -> bool {
-        self.n.is_none()
+        matches!(self, Self::NaN)
     }
 }
 
@@ -45,7 +51,9 @@ impl<'a> FromSql<'a> for PgNumeric {
         let sign = match rdr.read_u16::<BigEndian>()? {
             0x4000 => num_bigint::Sign::Minus,
             0x0000 => num_bigint::Sign::Plus,
-            0xC000 => return Ok(Self { n: None }),
+            0xC000 => return Ok(Self::NaN),
+            0xD000 => return Ok(Self::PositiveInf),
+            0xF000 => return Ok(Self::NegativeInf),
             _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "").into()),
         };
         let scale = rdr.read_u16::<BigEndian>()?;
@@ -66,7 +74,7 @@ impl<'a> FromSql<'a> for PgNumeric {
         let res = BigDecimal::new(BigInt::from_biguint(sign, biguint), -correction_exp)
             .with_scale(i64::from(scale));
 
-        Ok(Self { n: Some(res) })
+        Ok(Self::Normalized(res))
     }
 
     fn accepts(ty: &Type) -> bool {
@@ -98,13 +106,20 @@ impl ToSql for PgNumeric {
             write_header(out, 0, 0, 0xC000, 0);
             // no body for nan
         }
-
-        match &self.n {
-            None => {
-                write_nan(out);
-                Ok(IsNull::No)
-            }
-            Some(n) => {
+        fn write_p_inf(out: &mut BytesMut) {
+            // 8 bytes for the header (4 * 2byte numbers)
+            out.reserve(8);
+            write_header(out, 0, 0, 0xD000, 0);
+            // no body for nan
+        }
+        fn write_n_inf(out: &mut BytesMut) {
+            // 8 bytes for the header (4 * 2byte numbers)
+            out.reserve(8);
+            write_header(out, 0, 0, 0xF000, 0);
+            // no body for nan
+        }
+        match &self {
+            PgNumeric::Normalized(n) => {
                 let (bigint, exponent) = n.as_bigint_and_exponent();
                 let (sign, biguint) = bigint.into_parts();
                 let neg = sign == num_bigint::Sign::Minus;
@@ -160,6 +175,18 @@ impl ToSql for PgNumeric {
 
                 write_body(out, &digits);
 
+                Ok(IsNull::No)
+            }
+            PgNumeric::PositiveInf => {
+                write_p_inf(out);
+                Ok(IsNull::No)
+            }
+            PgNumeric::NegativeInf => {
+                write_n_inf(out);
+                Ok(IsNull::No)
+            }
+            PgNumeric::NaN => {
+                write_nan(out);
                 Ok(IsNull::No)
             }
         }
@@ -318,10 +345,10 @@ fn integration_tests() {
             .get::<usize, Option<String>>(0)
             .unwrap();
         let got = match got_as_str.as_str() {
-            "NaN" => PgNumeric { n: None },
-            s => PgNumeric {
-                n: Some(BigDecimal::from_str(s).unwrap()),
-            },
+            "NaN" => PgNumeric::NaN,
+            "Infinity" => PgNumeric::PositiveInf,
+            "-Infinity" => PgNumeric::NegativeInf,
+            s => PgNumeric::Normalized(BigDecimal::from_str(s).unwrap()),
         };
         assert_eq!(pgnumeric, got);
     };
@@ -345,27 +372,27 @@ fn integration_tests() {
         "3.14159265",
         "98756756756756756756756757657657656756756756756757656745644534534535435434567567656756757658787687676855674456345345364564.5675675675765765765765765756",
 "204093200000000000000000000000000000000",
-        "nan"
+        "nan",
+        "inf",
+        "-inf",
     ];
     for n in tests {
-        let n = match n {
-            &"nan" => PgNumeric { n: None },
-            _ => PgNumeric {
-                n: Some(BigDecimal::from_str(n).unwrap()),
-            },
+        let n = match *n {
+            "nan" => PgNumeric::NaN,
+            "inf" => PgNumeric::PositiveInf,
+            "-inf" => PgNumeric::NegativeInf,
+            s => PgNumeric::Normalized(BigDecimal::from_str(s).unwrap()),
         };
 
         test_for_pgnumeric(n);
     }
 
     for n in tests {
-        if n == &"nan" {
+        if n == &"nan" || n == &"inf" || n == &"-inf" {
             continue;
         }
 
-        let n = PgNumeric {
-            n: Some(BigDecimal::from_str(n).unwrap() * BigDecimal::from(-1)),
-        };
+        let n = PgNumeric::Normalized(BigDecimal::from_str(n).unwrap() * BigDecimal::from(-1));
         test_for_pgnumeric(n);
     }
 
